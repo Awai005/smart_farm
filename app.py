@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration: URL of the lora_service APIs
 # Replace with your actual ngrok URL
-LORA_SERVICE_URL = "https://303c-124-111-21-208.ngrok-free.app"
+LORA_SERVICE_URL = "https://1b54-124-111-21-208.ngrok-free.app"
 
 # Scheduler setup
 scheduler = BackgroundScheduler()
