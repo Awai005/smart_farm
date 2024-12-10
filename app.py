@@ -1,127 +1,134 @@
-from flask import Flask
-from flask_sqlalchemy import SQLAlchemy
-from flask_apscheduler import APScheduler
+from flask import Flask, request, jsonify
 from flask_cors import CORS
-from config import Config
-from models import db, NodeData
-from routes.api import api_bp
-from lora_service import get_node_data, get_pump_status, get_tank_threshold
-import math
+import requests
 import logging
-import os
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.interval import IntervalTrigger
+import atexit
+
+app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Initialize Flask app
-app = Flask(__name__)
-app.config.from_object(Config)
-CORS(app)
+# Configuration: URL of the lora_service APIs
+# Replace with your actual ngrok URL
+LORA_SERVICE_URL = "https://303c-124-111-21-208.ngrok-free.app"
 
-# Initialize SQLAlchemy
-db.init_app(app)
-
-# Register API Blueprint
-app.register_blueprint(api_bp, url_prefix='/api')
-
-# Create database tables
-with app.app_context():
-    db.create_all()
-
-# Scheduler configuration
-class ConfigWithScheduler(Config):
-    SCHEDULER_API_ENABLED = True
-
-
-app.config.from_object(ConfigWithScheduler)
-scheduler = APScheduler()
-scheduler.init_app(app)
-
-# Task to fetch data from nodes, parse it, and save to the database
-def fetch_node_data():
-    logging.info("Fetching data from nodes...")
-    for node_id in [1, 2]:  # Add more node IDs if needed
-        raw_data = get_node_data(node_id)
-        if raw_data:
-            logging.info(f"Raw data from Node {node_id}: {raw_data}")
-            try:
-                # Parse data in the format: "Node <NODE_ID> | M:<moisture>, H:<humidity>, T:<temperature>"
-                parts = raw_data.split("|")[1].strip()  # Extract "M:<value>, H:<value>, T:<value>"
-                values = {kv.split(":")[0]: float(kv.split(":")[1]) for kv in parts.split(", ")}
-
-                # Extract parsed values
-                soil_moisture = values['M']
-                humidity = values['H']
-                temperature = values['T']
-
-                # Set default values for NaN
-                humidity = 0.0 if math.isnan(humidity) else humidity
-                temperature = 0.0 if math.isnan(temperature) else temperature
-
-                # Save to database
-                with app.app_context():
-                    new_entry = NodeData(
-                        node_id=f"node{node_id}",
-                        soil_moisture=soil_moisture,
-                        temperature=temperature,
-                        humidity=humidity
-                    )
-                    db.session.add(new_entry)
-                    db.session.commit()
-
-                logging.info(f"Data saved for Node {node_id}: M={soil_moisture}, H={humidity}, T={temperature}")
-
-            except (KeyError, ValueError) as e:
-                logging.error(f"Failed to parse data from Node {node_id}: {raw_data}, Error: {str(e)}")
-        else:
-            logging.warning(f"No response from Node {node_id}.")
-# Task to log pump statuses
-def log_pump_status():
-    logging.info("Fetching pump statuses...")
-    for node_id in [1, 2]:  # Add more node IDs if needed
-        status = get_pump_status(node_id)
-        if status is not None:
-            logging.info(f"Pump status for Node {node_id}: {'ON' if status else 'OFF'}")
-        else:
-            logging.warning(f"No response for pump status from Node {node_id}.")
-
-# Task to log tank water level threshold
-def log_tank_threshold():
-    logging.info("Fetching tank water level threshold...")
-    threshold = get_tank_threshold()
-    if threshold is not None:
-        logging.info(f"Tank water level threshold: {threshold} liters")
-    else:
-        logging.warning("No response from tank node.")
-
-# Add scheduled tasks
-scheduler.add_job(
-    id="fetch_node_data",  # Unique job ID
-    func=fetch_node_data,  # Function to call
-    trigger="interval",  # Trigger type
-    minutes=1  # Run every 1 minute
-)
-scheduler.add_job(
-    id="log_pump_status",  # Unique job ID
-    func=log_pump_status,  # Function to call
-    trigger="interval",  # Trigger type
-    minutes=2  # Run every 2 minutes
-)
-scheduler.add_job(
-    id="log_tank_threshold",  # Unique job ID
-    func=log_tank_threshold,  # Function to call
-    trigger="interval",  # Trigger type
-    minutes=5  # Run every 5 minutes
-)
-
-# Start the scheduler
+# Scheduler setup
+scheduler = BackgroundScheduler()
 scheduler.start()
 
-if __name__ == '__main__':
+# Ensure the scheduler shuts down gracefully on application exit
+atexit.register(lambda: scheduler.shutdown())
+
+# Helper function to send requests to lora_service
+def send_lora_request(method, endpoint, **kwargs):
+    """
+    Sends an HTTP request to the lora_service.
+
+    :param method: HTTP method ('get', 'post', etc.)
+    :param endpoint: API endpoint (e.g., '/node_data/1')
+    :param kwargs: Additional arguments for requests.request
+    :return: Tuple (response_json, status_code)
+    """
+    url = f"{LORA_SERVICE_URL}{endpoint}"
     try:
-        # Get the port number from the environment (default to 5000 for local development)
-        port = int(os.environ.get('PORT', 5000))
-        app.run(host='0.0.0.0', port=port)  # Accessible over the network
-    except (KeyboardInterrupt, SystemExit):
-        logging.info("Shutting down scheduler...")
-        scheduler.shutdown(wait=False)
+        response = requests.request(method, url, timeout=10, **kwargs)
+        response.raise_for_status()
+        logger.info(f"Successful {method.upper()} request to {url}")
+        return response.json(), response.status_code
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error during {method.upper()} request to {url}: {e}")
+        return {"status": "error", "message": str(e)}, 500
+
+@app.route('/periodic_data/<int:node_id>', methods=['GET'])
+def periodic_data(node_id):
+    """
+    Fetch periodic data from a node.
+    """
+    response, status_code = send_lora_request('get', f"/periodic_data/{node_id}")
+    return jsonify(response), status_code
+
+@app.route('/tank_data/<int:node_id>', methods=['GET'])
+def tank_data(node_id):
+    """
+    Fetches the tank data (e.g., water level threshold) for a specific node from the LoRa service.
+    """
+    response, status_code = send_lora_request('get', f"/tank-data/{node_id}")
+    return jsonify(response), status_code
+
+@app.route('/set_threshold/<int:node_id>', methods=['POST'])
+def set_threshold(node_id):
+    """
+    Set threshold for a specific node.
+    """
+    data = request.get_json()
+    if not data or "threshold" not in data:
+        return jsonify({"status": "error", "message": "Threshold not provided"}), 400
+
+    threshold = data.get("threshold")
+
+    # Ensure threshold is an integer
+    try:
+        threshold = int(threshold)
+    except (ValueError, TypeError):
+        return jsonify({"status": "error", "message": "Threshold must be an integer"}), 400
+
+    payload = {"threshold": threshold}
+    response, status_code = send_lora_request('post', f"/set_threshold/{node_id}", json=payload)
+    return jsonify(response), status_code
+
+@app.route('/all_node_data', methods=['GET'])
+def all_node_data():
+    """
+    Retrieve data from all nodes.
+    """
+    response, status_code = send_lora_request('get', "/all_node_data")
+    return jsonify(response), status_code
+
+@app.route('/get_node_data/<int:node_id>', methods=['GET'])
+def get_node_data(node_id):
+    """
+    Fetch data from a specific node.
+    """
+    response, status_code = send_lora_request('get', f"/node_data/{node_id}")
+    return jsonify(response), status_code
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """
+    Health check endpoint.
+    """
+    return jsonify({"status": "healthy"}), 200
+
+def scheduled_periodic_data():
+    """
+    Scheduled task to fetch periodic data for all nodes.
+    """
+    node_ids = [1, 2, 3]  # Replace with your actual node IDs
+    for node_id in node_ids:
+        logger.info(f"Fetching periodic data for Node {node_id}")
+        response, status_code = send_lora_request('get', f"/periodic_data/{node_id}")
+        if status_code == 200:
+            logger.info(f"Periodic data for Node {node_id}: {response}")
+        else:
+            logger.error(f"Failed to fetch periodic data for Node {node_id}: {response}")
+
+# Schedule the periodic task to run every 30 minutes
+scheduler.add_job(
+    func=scheduled_periodic_data,
+    trigger=IntervalTrigger(minutes=30),
+    id='fetch_periodic_data',
+    name='Fetch periodic data for all nodes every 30 minutes',
+    replace_existing=True
+)
+
+if __name__ == "__main__":
+    try:
+        port = 8000  # Set your desired port here
+        app.run(host="0.0.0.0", port=port, debug=True)
+    except Exception as e:
+        logger.error(f"Failed to start the application: {e}")
