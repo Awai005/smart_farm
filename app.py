@@ -57,7 +57,7 @@ def tank_data(node_id):
     """
     Fetches the tank data (e.g., water level threshold) for a specific node from the LoRa service.
     """
-    response, status_code = send_lora_request('get', f"/tank-data/{node_id}")
+    response, status_code = send_lora_request('get', f"/tank_data/{node_id}")
     return jsonify(response), status_code
 
 @app.route('/set_threshold/<int:node_id>', methods=['POST'])
