@@ -108,7 +108,7 @@ def scheduled_periodic_data():
     """
     Scheduled task to fetch periodic data for all nodes.
     """
-    node_ids = [1, 2, 3]  # Replace with your actual node IDs
+    node_ids = [1, 2]  # Replace with your actual node IDs
     for node_id in node_ids:
         logger.info(f"Fetching periodic data for Node {node_id}")
         response, status_code = send_lora_request('get', f"/periodic_data/{node_id}")
