@@ -128,7 +128,7 @@ scheduler.add_job(
 
 if __name__ == "__main__":
     try:
-        port = 8000  # Set your desired port here
+        port = int(os.environ.get("PORT", 8000))  # Use PORT if available, default to 8000
         app.run(host="0.0.0.0", port=port, debug=True)
     except Exception as e:
         logger.error(f"Failed to start the application: {e}")
